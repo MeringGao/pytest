@@ -1,0 +1,266 @@
+#+TITLE: pluggy
+
+* 介绍
+
+pluggy 是一个插件框架，提供了 3 个重要部件: PluginManager、HookspecMarker、HookimplMarker。
+
+- HookspecMarker: 用于标识要实现的插件
+- HookimplMarker: 用于标识插件的具体实现，一个插件可以多个具体实现。
+- PluginManager: 用于注册插件，以及绑定插件的具体实现。
+
+来看下如何使用
+#+BEGIN_SRC python :results output
+  from pluggy import PluginManager, HookspecMarker, HookimplMarker
+
+  project_name = 'my-project'
+
+  specmarker = HookspecMarker(project_name)
+
+  impmarker = HookimplMarker(project_name)
+
+
+  class MySpec():
+      # 标识一个要实现的插件，通过 specmarker 装饰一个函数
+      # 这个函数不需要有具体的代码实现，因为只是作为一个标识，可以把他理解为一个抽象的函数，或者抽象方法
+      @specmarker
+      def my_hook_def(self, arg1, arg2):
+          pass
+
+
+  class MyImp():
+      # 标识插件的具体实现，注意这里被装饰的函数名和标识插件的名称一致
+      @impmarker
+      def my_hook_def(self, arg1, arg2):
+          print('my hook def 1')
+
+
+  class MyImp2():
+      # 标识插件的具体实现，注意这里被装饰的函数名和标识插件的名称一致
+      @impmarker
+      def my_hook_def(self, arg1, arg2):
+          print('my hook def 2')
+
+
+  pm = PluginManager(project_name)
+
+  # 注册插件
+  pm.add_hookspecs(MySpec())
+  # 注册插件的具体实现
+  pm.register(MyImp())
+  pm.register(MyImp2())
+  pm.hook.my_hook_def()
+#+END_SRC
+
+#+RESULTS:
+: my hook def 2
+: my hook def 1
+
+** HookspecMarker 的作用
+
+specmarker是一个可以调用对象,src_python{def __call__(self, function=None, firstresult=False, historic=False, warn_on_impl=None)}，参数说明:
+- firstresult: 插件可以有多个实现，并且调用的时候会把插件的所有结果放在一个列表中返回。如果设置了 firstresult=True，那么在插件的具体是实现调用过程中，如果有一个函数返回了 非 None 值，那么就停止调用，并且返回这个值。
+- historic: 插件的调用过程会被保存，并且在后面的调用过程中回放。
+
+specmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 src_python{f'{self.project_name}_spec'}，属性值是: src_python{{"firstresult":firstresult,"historic":historic,"warn_on_impl":warn_on_impl}}
+
+
+** HookimplMarker 的作用
+
+impmarker 也是一个可调用对象，src_python{def __call__(self, function=None, hookwrapper=False, optionalhook=False, tryfirst=False,trylast=False,)}
+
+参数说明:
+- optionnalhook : 通常情况下我们应当先注册插件，然后在注册插件的具体实现，如果先进行插件具体实现的注册，会抛出异常。如果 optionalhook=True，那么在没有对应的插件存在时，也不会报错。
+- tryfirst: 由于有多个插件的具体实现，如果 tryfisrt=True，那么这个插件的实现会尽可能早的执行。实际上就是将这个实现插入到实现列表的尾部，因为先从尾部开始调用。
+- trylast: 和 tryfirst 相反
+- hookwrapper: 这个是当插件实现的代码中包含 yield 命令的时候会用到这个参数，yield 之前的代码会在所有不包含 yield 命令的实现之前优先被执行，yield 之后的代码会在所有不包含 yield 命令的实现之后被执行。
+
+impmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 src_python{f'{self.project_name}_impl'}，属性值是: src_python{{"hookwrapper":hookwrapper,"optionalhook":optionalhook,"tryfirst":tryfirst,"trylast":trylast}}
+
+
+**  pm.add_hookspecs(MySpec()) 的作用
+
+pm 对象有个 hook 属性，这个属性就是一个 Object 对象，没有任何特殊之处。
+
+#+BEGIN_SRC python
+
+    def add_hookspecs(self, module_or_class):
+        """ add new hook specifications defined in the given ``module_or_class``.
+        Functions are recognized if they have been decorated accordingly. """
+        names = []
+        # 这里是遍历模块或者类的属性
+        for name in dir(module_or_class):
+            # 读取 name 对象对应的属性 self.project_name + '_spec'，如果有这个属性，说明他被 specmarker 装饰过
+            # 也就是说明他是一个插件说明
+            spec_opts = self.parse_hookspec_opts(module_or_class, name)
+            if spec_opts is not None:
+                # 读取 self.hook 有没有注册过这个插件
+                hc = getattr(self.hook, name, None)
+                if hc is None:
+                    # 没有注册过这个插件就，生成一个新的插件对象，
+                    hc = _HookCaller(name, self._hookexec, module_or_class, spec_opts)
+                    # 注册这个新的插件对象
+                    setattr(self.hook, name, hc)
+                else:
+                    # plugins registered this hook without knowing the spec
+                    # 如果已经注册过了这个插件，那么覆盖调用
+                    hc.set_specification(module_or_class, spec_opts)
+                    for hookfunction in hc.get_hookimpls():
+                        # 检查每一个插件的具体实现的函数参数和插件定义的函数参数是否一致
+                        self._verify_hook(hc, hookfunction)
+                names.append(name)
+
+        if not names:
+            raise ValueError(
+                "did not find any %r hooks in %r" % (self.project_name, module_or_class)
+            )
+#+END_SRC
+
+** pm.register 的作用
+
+就是添加插件的具体实现
+
+#+BEGIN_SRC python
+
+    def register(self, plugin, name=None):
+        """ Register a plugin and return its canonical name or ``None`` if the name
+        is blocked from registering.  Raise a :py:class:`ValueError` if the plugin
+        is already registered. """
+        plugin_name = name or self.get_canonical_name(plugin)
+
+        if plugin_name in self._name2plugin or plugin in self._plugin2hookcallers:
+            if self._name2plugin.get(plugin_name, -1) is None:
+                return  # blocked plugin, return None to indicate no registration
+            raise ValueError(
+                "Plugin already registered: %s=%s\n%s"
+                % (plugin_name, plugin, self._name2plugin)
+            )
+
+        # XXX if an error happens we should make sure no state has been
+        # changed at point of return
+        # 字典对象，记录插件名字对应的插件
+        self._name2plugin[plugin_name] = plugin
+
+        # register matching hook implementations of the plugin
+        # 字典属性，记录插件对应调用方法
+        self._plugin2hookcallers[plugin] = hookcallers = []
+        # 遍历 plugin 对象的所有属性
+        for name in dir(plugin):
+            # 如果这个 name 对象是被 impmarker 装饰过，那么可以获取到他的 self.project_name + '_impl' 属性值，也就是他是个插件的具体实现
+            hookimpl_opts = self.parse_hookimpl_opts(plugin, name)
+            if hookimpl_opts is not None:
+                # 如果是插件的具体实现，
+                normalize_hookimpl_opts(hookimpl_opts)
+                # 读取插件的具体实现函数
+                method = getattr(plugin, name)
+                # 生成插件的具体实现对象
+                hookimpl = HookImpl(plugin, plugin_name, method, hookimpl_opts)
+                # 读取产检
+                hook = getattr(self.hook, name, None)
+                if hook is None:
+                    # 如果没有注册过这个插件，新增这个插件
+                    hook = _HookCaller(name, self._hookexec)
+                    setattr(self.hook, name, hook)
+                elif hook.has_spec():
+                    # 如果注册过了，就校验插件和这个实现参数是否一致
+                    self._verify_hook(hook, hookimpl)
+
+                    hook._maybe_apply_history(hookimpl)
+                # 插件中添加具体的实现
+                hook._add_hookimpl(hookimpl)
+                hookcallers.append(hook)
+        return plugin_name
+#+END_SRC
+
+** 插件的调用
+pm.hook.{插件名}(命名参数)，就是调用 HookCaller 对象 hookcaller(命名参数)。
+#+BEGIN_SRC python
+    # HookCaller.__call__
+    def __call__(self, *args, **kwargs):
+        # 只能传递命名参数
+        if args:
+            raise TypeError("hook calling supports only keyword arguments")
+        assert not self.is_historic()
+
+        # ....
+        #  def __init__(self, name, hook_execute, specmodule_or_class=None, spec_opts=None):
+        #        self._hookexec = hook_execute # 这个来自于 PluginManager._hookexec
+        #
+        return self._hookexec(self, self.get_hookimpls(), kwargs)
+
+    # PluginManager._hookexec
+    def _hookexec(self, hook, methods, kwargs):
+        # called from all hookcaller instances.
+        # enable_tracing will set its own wrapping function at self._inner_hookexec
+        return self._inner_hookexec(hook, methods, kwargs)
+
+    # hook 对象初始化的时候，设置了 self._inner_hookexec
+    self._inner_hookexec = lambda hook, methods, kwargs: hook.multicall(
+            methods,
+            kwargs,
+            firstresult=hook.spec.opts.get("firstresult") if hook.spec else False,
+        )
+   # _muticall
+
+def _multicall(hook_impls, caller_kwargs, firstresult=False):
+    """Execute a call into multiple python functions/methods and return the
+    result(s).
+
+    ``caller_kwargs`` comes from _HookCaller.__call__().
+    """
+    __tracebackhide__ = True
+    results = []
+    excinfo = None
+    try:  # run impl and wrapper setup functions in a loop
+        teardowns = []
+        try:
+            # 倒序调用注册的插件实现
+            for hook_impl in reversed(hook_impls):
+                # 读取函数参数
+                try:
+                    args = [caller_kwargs[argname] for argname in hook_impl.argnames]
+                except KeyError:
+                    for argname in hook_impl.argnames:
+                        if argname not in caller_kwargs:
+                            raise HookCallError(
+                                "hook call must provide argument %r" % (argname,)
+                            )
+                # 是否是带有 yield 语句的函数
+                if hook_impl.hookwrapper:
+                    try:
+                        gen = hook_impl.function(*args)
+                        # 先执行 yield 之前的语句
+                        next(gen)  # first yield
+                        # 放入到后调用队列中
+                        teardowns.append(gen)
+                    except StopIteration:
+                        _raise_wrapfail(gen, "did not yield")
+                else:
+                    # 调用函数
+                    res = hook_impl.function(*args)
+                    if res is not None:
+                        # 如果函数返回值不为 None，就保存返回值
+                        results.append(res)
+                        # 如果设置了只获取第一个函数的返回值，那么退出执行
+                        if firstresult:  # halt further impl calls
+                            break
+        except BaseException:
+            excinfo = sys.exc_info()
+    finally:
+        # yield 之后的代码执行
+        # 如果支取第一个值，那么这个的 results 最多有一个元素，或者没有元素
+        if firstresult:  # first result hooks return a single value
+            outcome = _Result(results[0] if results else None, excinfo)
+        else:
+            outcome = _Result(results, excinfo)
+
+        # run all wrapper post-yield blocks
+        for gen in reversed(teardowns):
+            try:
+                # 将结果发送个 yield 语句继续执行所有的 yield 之后的代码
+                gen.send(outcome)
+                _raise_wrapfail(gen, "has second yield")
+            except StopIteration:
+                pass
+
+        return outcome.get_result()
+#+END_SRC
