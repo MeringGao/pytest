@@ -1,4 +1,5 @@
 #+TITLE: pluggy
+#+PROPERTY: header-args:python :exports both :eval never-export :session python-pluggy
 
 * 介绍
 
@@ -9,7 +10,9 @@ pluggy 是一个插件框架，提供了 3 个重要部件: PluginManager、Hook
 - PluginManager: 用于注册插件，以及绑定插件的具体实现。
 
 来看下如何使用
-#+BEGIN_SRC python :results output
+
+
+#+BEGIN_SRC python :results output :python python3 :tangle pluggy.py :comments org :padline yes :return pm,specmarker
   from pluggy import PluginManager, HookspecMarker, HookimplMarker
 
   project_name = 'my-project'
@@ -48,25 +51,27 @@ pluggy 是一个插件框架，提供了 3 个重要部件: PluginManager、Hook
   # 注册插件的具体实现
   pm.register(MyImp())
   pm.register(MyImp2())
-  pm.hook.my_hook_def()
+  pm.hook.my_hook_def(arg1=1, arg2=2)
+
 #+END_SRC
 
 #+RESULTS:
 : my hook def 2
 : my hook def 1
 
+
 ** HookspecMarker 的作用
 
-specmarker是一个可以调用对象,src_python{def __call__(self, function=None, firstresult=False, historic=False, warn_on_impl=None)}，参数说明:
+specmarker是一个可以调用对象, ~def __call__(self, function=None, firstresult=False, historic=False, warn_on_impl=None)~ ，参数说明:
 - firstresult: 插件可以有多个实现，并且调用的时候会把插件的所有结果放在一个列表中返回。如果设置了 firstresult=True，那么在插件的具体是实现调用过程中，如果有一个函数返回了 非 None 值，那么就停止调用，并且返回这个值。
 - historic: 插件的调用过程会被保存，并且在后面的调用过程中回放。
 
-specmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 src_python{f'{self.project_name}_spec'}，属性值是: src_python{{"firstresult":firstresult,"historic":historic,"warn_on_impl":warn_on_impl}}
+specmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 ~f'{self.project_name}_spec'~ ，属性值是: ~{"firstresult":firstresult,"historic":historic,"warn_on_impl":warn_on_impl}~
 
 
 ** HookimplMarker 的作用
 
-impmarker 也是一个可调用对象，src_python{def __call__(self, function=None, hookwrapper=False, optionalhook=False, tryfirst=False,trylast=False,)}
+impmarker 也是一个可调用对象， ~def __call__(self, function=None, hookwrapper=False, optionalhook=False, tryfirst=False,trylast=False,)~
 
 参数说明:
 - optionnalhook : 通常情况下我们应当先注册插件，然后在注册插件的具体实现，如果先进行插件具体实现的注册，会抛出异常。如果 optionalhook=True，那么在没有对应的插件存在时，也不会报错。
@@ -74,10 +79,10 @@ impmarker 也是一个可调用对象，src_python{def __call__(self, function=N
 - trylast: 和 tryfirst 相反
 - hookwrapper: 这个是当插件实现的代码中包含 yield 命令的时候会用到这个参数，yield 之前的代码会在所有不包含 yield 命令的实现之前优先被执行，yield 之后的代码会在所有不包含 yield 命令的实现之后被执行。
 
-impmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 src_python{f'{self.project_name}_impl'}，属性值是: src_python{{"hookwrapper":hookwrapper,"optionalhook":optionalhook,"tryfirst":tryfirst,"trylast":trylast}}
+impmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 ~f'{self.project_name}_impl'~ ，属性值是: ~{"hookwrapper":hookwrapper,"optionalhook":optionalhook,"tryfirst":tryfirst,"trylast":trylast}~
 
 
-**  pm.add_hookspecs(MySpec()) 的作用
+**  ~pm.add_hookspecs(MySpec())~ 的作用
 
 pm 对象有个 hook 属性，这个属性就是一个 Object 对象，没有任何特殊之处。
 
@@ -262,5 +267,5 @@ def _multicall(hook_impls, caller_kwargs, firstresult=False):
             except StopIteration:
                 pass
 
-        return outcome.get_result()
+                return outcome.get_result()
 #+END_SRC
