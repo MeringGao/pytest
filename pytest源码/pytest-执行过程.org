@@ -466,18 +466,6 @@ def get_config(args=None, plugins=None):
 =========== pytest_report_teststatus
 =========== pytest_runtest_logfinish
 
-=========== pytest_runtest_makereport
-=========== pytest_runtest_logreport
-=========== pytest_report_teststatus
-=========== pytest_fixture_setup
-=========== pytest_runtest_call
-=========== pytest_pyfunc_call
-=========== pytest_runtest_teardown
-=========== pytest_runtest_makereport
-=========== pytest_runtest_logreport
-=========== pytest_report_teststatus
-=========== pytest_fixture_post_finalizer
-=========== pytest_runtest_logfinish
 
 
 ;; 测试结束

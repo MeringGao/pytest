@@ -1,0 +1,74 @@
+#+TITLE: pytest 目录结构
+
+#+BEGIN_SRC shell :results output pp replace
+tree ~/.envs/py3/lib/python3.8/site-packages/_pytest
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest
+├── __init__.py
+├── _argcomplete.py
+├── _code                         ;; python 的 code，frame 的扩展
+│   ├── __init__.py
+│   ├── code.py
+│   └── source.py
+├── _io
+│   ├── __init__.py
+│   └── saferepr.py
+├── _version.py
+├── assertion                     ;; 断言相关。主要是支持打印断言具体失败原因等
+│   ├── __init__.py
+│   ├── rewrite.py
+│   ├── truncate.py
+│   └── util.py
+├── cacheprovider.py
+├── capture.py                    ;; 捕获 pytest 的输出
+├── compat.py                     ;; 不同 python 版本的处理
+├── config                        ;; 命令行参数，配置文件和 conftest 的支持
+│   ├── __init__.py
+│   ├── argparsing.py
+│   ├── exceptions.py
+│   └── findpaths.py
+├── debugging.py                  ;; 用于支持 pdb 调试
+├── deprecated.py                 ;; 不含一些不在使用的信息
+├── doctest.py                    ;; 文档内测试的支持
+├── faulthandler.py               ;; pytest 的异常处理
+├── fixtures.py                   ;; fixtures 的核心模块
+├── freeze_support.py
+├── helpconfig.py                 ;; 打印帮助信息
+├── hookspec.py                   ;; pytest 内置插件的定义
+├── junitxml.py                   ;; JUnit-XML 格式报告的支持
+├── logging.py                    ;; 日志打印相关
+├── main.py                       ;; pytest 主入口，测试的初始化，session数据，执行测试都在这里
+├── mark                          ;; pytest 标记相关，主要是支持选择特定标记的 python 函数
+│   ├── __init__.py
+│   ├── evaluate.py
+│   ├── legacy.py
+│   └── structures.py
+├── monkeypatch.py                ;; monkeypath 相关
+├── nodes.py                      ;; 提供了搜集测试用例的基础类
+├── nose.py                       ;; 另外一个测试框架 nose 语法的相关支持
+├── outcomes.py                   ;; 对测试结果的处理
+├── pastebin.py                   ;; 将测试结果发送的 pastbin 服务器上
+├── pathlib.py                    ;; 主要是文件路径相关处理
+├── pytester.py                   ;; 用于测试 pytest 本身的，默认是关闭的
+├── python.py                     ;; 主要是 python 测试用例的搜集，初始化，执行
+├── python_api.py                 ;; python 的一些基类，定义了一些接口, pytest.raises
+├── recwarn.py                    ;; 记录测试过程中的警告信息，pytest.warns
+├── reports.py                    ;; 测试输出的报告类
+├── resultlog.py                  ;; 测试过程的日志记录
+├── runner.py                     ;; 基础的搜集和执行测试的实现
+├── setuponly.py                  ;; 只进行配置，不运行测试，setuponly ，setupshow 参数的支持
+├── setupplan.py                  ;; setupplan 参数的支持
+├── skipping.py                   ;; skip/xfail 标记的实现
+├── stepwise.py                   ;; stepwise 参数的支持
+├── store.py                      ;;
+├── terminal.py                   ;; 终端输出结果的相关功能
+├── tmpdir.py                     ;; 临时目录的支持
+├── unittest.py                   ;; 对 unittest 方式写的测试用例的支持
+├── warning_types.py              ;; pytest 自定义的警告类
+└── warnings.py                   ;; pythonwarnings 参数的支持
+
+5 directories, 57 files
+#+end_example
