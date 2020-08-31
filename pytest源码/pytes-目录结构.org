@@ -1,11 +1,6 @@
 #+TITLE: pytest 目录结构
 
-#+BEGIN_SRC shell :results output pp replace
-tree ~/.envs/py3/lib/python3.8/site-packages/_pytest
-#+END_SRC
-
-#+RESULTS:
-#+begin_example
+#+BEGIN_SRC shell
 /Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest
 ├── __init__.py
 ├── _argcomplete.py
@@ -71,4 +66,4 @@ tree ~/.envs/py3/lib/python3.8/site-packages/_pytest
 └── warnings.py                   ;; pythonwarnings 参数的支持
 
 5 directories, 57 files
-#+end_example
+#+END_SRC
