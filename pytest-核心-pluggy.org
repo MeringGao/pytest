@@ -1,24 +1,24 @@
-#+TITLE: pluggy
-#+PROPERTY: header-args:python :exports both :eval never-export :session python-pluggy
+#+TITLE: pytest 核心框架 Pluggy
+#+PROPERTY: header-args:python :exports both :eval never-export
 
 * 介绍
 
 pluggy 是一个插件框架，提供了 3 个重要部件: PluginManager、HookspecMarker、HookimplMarker。
 
-- HookspecMarker: 用于标识要实现的插件
-- HookimplMarker: 用于标识插件的具体实现，一个插件可以多个具体实现。
+- HookspecMarker: 定义插件
+- HookimplMarker: 定义插件的具体实现，一个插件可以多个具体实现。
 - PluginManager: 用于注册插件，以及绑定插件的具体实现。
 
 来看下如何使用
 
-
-#+BEGIN_SRC python :results output :python python3 :tangle pluggy.py :comments org :padline yes :return pm,specmarker
+#+BEGIN_SRC python :results output
   from pluggy import PluginManager, HookspecMarker, HookimplMarker
 
+  # 项目名称
   project_name = 'my-project'
-
+  # 定义插件装饰器，用于定义一个插件
   specmarker = HookspecMarker(project_name)
-
+  # 定义产检实现装饰器，用于标记函数或者方法是某个插件的具体实现
   impmarker = HookimplMarker(project_name)
 
 
@@ -31,14 +31,14 @@ pluggy 是一个插件框架，提供了 3 个重要部件: PluginManager、Hook
 
 
   class MyImp():
-      # 标识插件的具体实现，注意这里被装饰的函数名和标识插件的名称一致
+      # 标识插件的具体实现，注意这里被装饰的函数名和定义插件的名称一致
       @impmarker
       def my_hook_def(self, arg1, arg2):
           print('my hook def 1')
 
 
   class MyImp2():
-      # 标识插件的具体实现，注意这里被装饰的函数名和标识插件的名称一致
+      # 标识插件的具体实现，注意这里被装饰的函数名和定义插件的名称一致
       @impmarker
       def my_hook_def(self, arg1, arg2):
           print('my hook def 2')
@@ -62,7 +62,7 @@ pluggy 是一个插件框架，提供了 3 个重要部件: PluginManager、Hook
 
 ** HookspecMarker 的作用
 
-specmarker是一个可以调用对象, ~def __call__(self, function=None, firstresult=False, historic=False, warn_on_impl=None)~ ，参数说明:
+specmarker 是一个可以调用对象, ~def __call__(self, function=None, firstresult=False, historic=False, warn_on_impl=None)~ ，参数说明:
 - firstresult: 插件可以有多个实现，并且调用的时候会把插件的所有结果放在一个列表中返回。如果设置了 firstresult=True，那么在插件的具体是实现调用过程中，如果有一个函数返回了 非 None 值，那么就停止调用，并且返回这个值。
 - historic: 插件的调用过程会被保存，并且在后面的调用过程中回放。
 
@@ -82,9 +82,13 @@ impmarker 也是一个可调用对象， ~def __call__(self, function=None, hook
 impmarker 用于对方法或函数进行装饰，他所操作就是给被装饰函数设置一个属性，属性名是 ~f'{self.project_name}_impl'~ ，属性值是: ~{"hookwrapper":hookwrapper,"optionalhook":optionalhook,"tryfirst":tryfirst,"trylast":trylast}~
 
 
-**  ~pm.add_hookspecs(MySpec())~ 的作用
+** =pm.add_hookspecs(MySpec())= 的作用
 
 pm 对象有个 hook 属性，这个属性就是一个 Object 对象，没有任何特殊之处。
+
+=pm.add_hookspecs= 的作用就是给 pm.hook 设置一个属性，属性名就是定义的插件名，属性的值是一个 =_HookCaller= 对象
+
+
 
 #+BEGIN_SRC python
 
@@ -95,7 +99,7 @@ pm 对象有个 hook 属性，这个属性就是一个 Object 对象，没有任
         # 这里是遍历模块或者类的属性
         for name in dir(module_or_class):
             # 读取 name 对象对应的属性 self.project_name + '_spec'，如果有这个属性，说明他被 specmarker 装饰过
-            # 也就是说明他是一个插件说明
+            # 也就是说明他是一个插件定义
             spec_opts = self.parse_hookspec_opts(module_or_class, name)
             if spec_opts is not None:
                 # 读取 self.hook 有没有注册过这个插件
@@ -122,7 +126,7 @@ pm 对象有个 hook 属性，这个属性就是一个 Object 对象，没有任
 
 ** pm.register 的作用
 
-就是添加插件的具体实现
+就是添加插件的具体实现，插件的具体实现会被包装在 =HookImpl= 对象中，这个对象会保存到 =_HookCaller= 对象中
 
 #+BEGIN_SRC python
 
@@ -177,95 +181,106 @@ pm 对象有个 hook 属性，这个属性就是一个 Object 对象，没有任
 #+END_SRC
 
 ** 插件的调用
+
 pm.hook.{插件名}(命名参数)，就是调用 HookCaller 对象 hookcaller(命名参数)。
+
 #+BEGIN_SRC python
-    # HookCaller.__call__
-    def __call__(self, *args, **kwargs):
-        # 只能传递命名参数
-        if args:
-            raise TypeError("hook calling supports only keyword arguments")
-        assert not self.is_historic()
+  # pluggy.hooks._HookCaller
 
-        # ....
-        #  def __init__(self, name, hook_execute, specmodule_or_class=None, spec_opts=None):
-        #        self._hookexec = hook_execute # 这个来自于 PluginManager._hookexec
-        #
-        return self._hookexec(self, self.get_hookimpls(), kwargs)
+  def __call__(self, *args, **kwargs):
+      # 只能传递命名参数
+      if args:
+          raise TypeError("hook calling supports only keyword arguments")
+      assert not self.is_historic()
 
-    # PluginManager._hookexec
-    def _hookexec(self, hook, methods, kwargs):
-        # called from all hookcaller instances.
-        # enable_tracing will set its own wrapping function at self._inner_hookexec
-        return self._inner_hookexec(hook, methods, kwargs)
+      # ....
+      #  def __init__(self, name, hook_execute, specmodule_or_class=None, spec_opts=None):
+      #        self._hookexec = hook_execute # 这个来自于 PluginManager._hookexec
+      #
+      return self._hookexec(self, self.get_hookimpls(), kwargs)
+#+END_SRC
 
-    # hook 对象初始化的时候，设置了 self._inner_hookexec
-    self._inner_hookexec = lambda hook, methods, kwargs: hook.multicall(
-            methods,
-            kwargs,
-            firstresult=hook.spec.opts.get("firstresult") if hook.spec else False,
-        )
-   # _muticall
+#+BEGIN_SRC python
+  # manager.PluginManager._hookexec
+  def _hookexec(self, hook, methods, kwargs):
+      # called from all hookcaller instances.
+      # enable_tracing will set its own wrapping function at self._inner_hookexec
+      return self._inner_hookexec(hook, methods, kwargs)
 
-def _multicall(hook_impls, caller_kwargs, firstresult=False):
-    """Execute a call into multiple python functions/methods and return the
-    result(s).
+      # hook 对象初始化的时候，设置了 self._inner_hookexec
+      # self._inner_hookexec = lambda hook, methods, kwargs: hook.multicall(
+      #     methods,
+      #     kwargs,
+      #     firstresult=hook.spec.opts.get("firstresult") if hook.spec else False,
+      # )
 
-    ``caller_kwargs`` comes from _HookCaller.__call__().
-    """
-    __tracebackhide__ = True
-    results = []
-    excinfo = None
-    try:  # run impl and wrapper setup functions in a loop
-        teardowns = []
-        try:
-            # 倒序调用注册的插件实现
-            for hook_impl in reversed(hook_impls):
-                # 读取函数参数
-                try:
-                    args = [caller_kwargs[argname] for argname in hook_impl.argnames]
-                except KeyError:
-                    for argname in hook_impl.argnames:
-                        if argname not in caller_kwargs:
-                            raise HookCallError(
-                                "hook call must provide argument %r" % (argname,)
-                            )
-                # 是否是带有 yield 语句的函数
-                if hook_impl.hookwrapper:
-                    try:
-                        gen = hook_impl.function(*args)
-                        # 先执行 yield 之前的语句
-                        next(gen)  # first yield
-                        # 放入到后调用队列中
-                        teardowns.append(gen)
-                    except StopIteration:
-                        _raise_wrapfail(gen, "did not yield")
-                else:
-                    # 调用函数
-                    res = hook_impl.function(*args)
-                    if res is not None:
-                        # 如果函数返回值不为 None，就保存返回值
-                        results.append(res)
-                        # 如果设置了只获取第一个函数的返回值，那么退出执行
-                        if firstresult:  # halt further impl calls
-                            break
-        except BaseException:
-            excinfo = sys.exc_info()
-    finally:
-        # yield 之后的代码执行
-        # 如果支取第一个值，那么这个的 results 最多有一个元素，或者没有元素
-        if firstresult:  # first result hooks return a single value
-            outcome = _Result(results[0] if results else None, excinfo)
-        else:
-            outcome = _Result(results, excinfo)
+#+END_SRC
 
-        # run all wrapper post-yield blocks
-        for gen in reversed(teardowns):
-            try:
-                # 将结果发送个 yield 语句继续执行所有的 yield 之后的代码
-                gen.send(outcome)
-                _raise_wrapfail(gen, "has second yield")
-            except StopIteration:
-                pass
+#+BEGIN_SRC python
+  # pluggy.callers._muticall
 
-                return outcome.get_result()
+  def _multicall(hook_impls, caller_kwargs, firstresult=False):
+      """Execute a call into multiple python functions/methods and return the
+      result(s).
+
+      ``caller_kwargs`` comes from _HookCaller.__call__().
+      """
+      __tracebackhide__ = True
+      results = []
+      excinfo = None
+      try:  # run impl and wrapper setup functions in a loop
+          teardowns = []
+          try:
+              # 倒序调用注册的插件实现
+              for hook_impl in reversed(hook_impls):
+                  # 读取函数参数
+                  try:
+                      args = [caller_kwargs[argname]
+                              for argname in hook_impl.argnames]
+                  except KeyError:
+                      for argname in hook_impl.argnames:
+                          if argname not in caller_kwargs:
+                              raise HookCallError(
+                                  "hook call must provide argument %r" % (
+                                      argname,)
+                              )
+                  # 是否是带有 yield 语句的函数
+                  if hook_impl.hookwrapper:
+                      try:
+                          gen = hook_impl.function(*args)
+                          # 先执行 yield 之前的语句
+                          next(gen)  # first yield
+                          # 放入到后调用队列中
+                          teardowns.append(gen)
+                      except StopIteration:
+                          _raise_wrapfail(gen, "did not yield")
+                  else:
+                      # 调用函数
+                      res = hook_impl.function(*args)
+                      if res is not None:
+                          # 如果函数返回值不为 None，就保存返回值
+                          results.append(res)
+                          # 如果设置了只获取第一个函数的返回值，那么退出执行
+                          if firstresult:  # halt further impl calls
+                              break
+          except BaseException:
+              excinfo = sys.exc_info()
+      finally:
+          # yield 之后的代码执行
+          # 如果支取第一个值，那么这个的 results 最多有一个元素，或者没有元素
+          if firstresult:  # first result hooks return a single value
+              outcome = _Result(results[0] if results else None, excinfo)
+          else:
+              outcome = _Result(results, excinfo)
+
+          # run all wrapper post-yield blocks
+          for gen in reversed(teardowns):
+              try:
+                  # 将结果发送个 yield 语句继续执行所有的 yield 之后的代码
+                  gen.send(outcome)
+                  _raise_wrapfail(gen, "has second yield")
+              except StopIteration:
+                  pass
+
+                  return outcome.get_result()
 #+END_SRC

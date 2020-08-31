@@ -1,0 +1,517 @@
+#+TITLE: pytest 执行过程
+
+* 入口
+
+
+#+BEGIN_SRC python
+# _pytest.config.__init__.py::main
+def main(args=None, plugins=None) -> Union[int, ExitCode]:
+    """ return exit code, after performing an in-process test run.
+
+    :arg args: list of command line arguments.
+
+    :arg plugins: list of plugin objects to be auto-registered during
+                  initialization.
+    """
+    try:
+        try:
+            config = _prepareconfig(args, plugins)
+        except ConftestImportFailure as e:
+            exc_info = ExceptionInfo(e.excinfo)
+            tw = TerminalWriter(sys.stderr)
+            tw.line(
+                "ImportError while loading conftest '{e.path}'.".format(e=e), red=True
+            )
+            exc_info.traceback = exc_info.traceback.filter(filter_traceback)
+            exc_repr = (
+                exc_info.getrepr(style="short", chain=False)
+                if exc_info.traceback
+                else exc_info.exconly()
+            )
+            formatted_tb = str(exc_repr)
+            for line in formatted_tb.splitlines():
+                tw.line(line.rstrip(), red=True)
+            return ExitCode.USAGE_ERROR
+        else:
+            try:
+                # 开始执行测试过程: session 准备，搜集测试用例，执行测试用例，输出测试结果等。
+                ret = config.hook.pytest_cmdline_main(
+                    config=config
+                )  # type: Union[ExitCode, int]
+                try:
+                    return ExitCode(ret)
+                except ValueError:
+                    return ret
+            finally:
+                config._ensure_unconfigure()
+    except UsageError as e:
+        tw = TerminalWriter(sys.stderr)
+        for msg in e.args:
+            tw.line("ERROR: {}\n".format(msg), red=True)
+        return ExitCode.USAGE_ERROR
+
+# _pytest.config.__init__.py::_prepareconfig
+def _prepareconfig(
+    args: Optional[Union[py.path.local, List[str]]] = None, plugins=None
+):
+    if args is None:
+        args = sys.argv[1:]
+    elif isinstance(args, py.path.local):
+        args = [str(args)]
+    elif not isinstance(args, list):
+        msg = "`args` parameter expected to be a list of strings, got: {!r} (type: {})"
+        raise TypeError(msg.format(args, type(args)))
+
+    config = get_config(args, plugins)
+    pluginmanager = config.pluginmanager
+    try:
+        if plugins:
+            for plugin in plugins:
+                if isinstance(plugin, str):
+                    pluginmanager.consider_pluginarg(plugin)
+                else:
+                    pluginmanager.register(plugin)
+        # 第一个被调用的插件，就是用来初始化一些参数，返后返回一个 Config 对象
+        return pluginmanager.hook.pytest_cmdline_parse(
+            pluginmanager=pluginmanager, args=args
+        )
+    except BaseException:
+        config._ensure_unconfigure()
+        raise
+
+
+# _pytest.config.__init__.py::get_config
+def get_config(args=None, plugins=None):
+    # subsequent calls to main will create a fresh instance
+    # 产检管理器的初始化
+    pluginmanager = PytestPluginManager()
+
+    config = Config(
+        pluginmanager,
+        invocation_params=Config.InvocationParams(
+            args=args or (), plugins=plugins, dir=Path().resolve()
+        ),
+    )
+
+    if args is not None:
+        # Handle any "-p no:plugin" args.
+        pluginmanager.consider_preparse(args, exclude_only=True)
+    # 注册其他插件以及插件的实现，
+    # 主要是从下面这些模块中加载插件的具体实现
+    # ('mark', 'main', 'runner', 'fixtures', 'helpconfig', 'python', 'terminal', 'debugging', 'unittest', 'capture', 'skipping', 'tmpdir', 'monkeypatch', 'recwarn', 'pastebin', 'nose', 'assertion', 'junitxml', 'resultlog', 'doctest', 'cacheprovider', 'freeze_support', 'setuponly', 'setupplan', 'stepwise', 'warnings', 'logging', 'reports', 'faulthandler')
+    for spec in default_plugins:
+        pluginmanager.import_plugin(spec)
+    return config
+
+# 通过分析这个方法可以知道，pytest 插件的具体实现是分散定义在不同文件中的
+ def import_plugin(self, modname, consider_entry_points=False):
+        """
+        Imports a plugin with ``modname``. If ``consider_entry_points`` is True, entry point
+        names are also considered to find a plugin.
+        """
+        # most often modname refers to builtin modules, e.g. "pytester",
+        # "terminal" or "capture".  Those plugins are registered under their
+        # basename for historic purposes but must be imported with the
+        # _pytest prefix.
+        assert isinstance(modname, str), (
+            "module name as text required, got %r" % modname
+        )
+        modname = str(modname)
+        if self.is_blocked(modname) or self.get_plugin(modname) is not None:
+            return
+        # 待导入的模块的名字是 _pytest.{模块名}
+        # 我们可以在源码目录中看到 _pytest 包下面有很多 其他模块，这些模块基本都是插件和插件的实现，例如: _pytest.python
+        importspec = "_pytest." + modname if modname in builtin_plugins else modname
+
+        self.rewrite_hook.mark_rewrite(importspec)
+
+        if consider_entry_points:
+            loaded = self.load_setuptools_entrypoints("pytest11", name=modname)
+            if loaded:
+                return
+
+        try:
+            __import__(importspec)
+        except ImportError as e:
+            raise ImportError(
+                'Error importing plugin "{}": {}'.format(modname, str(e.args[0]))
+            ).with_traceback(e.__traceback__)
+
+        except Skipped as e:
+            from _pytest.warnings import _issue_warning_captured
+
+            _issue_warning_captured(
+                PytestConfigWarning("skipped plugin {!r}: {}".format(modname, e.msg)),
+                self.hook,
+                stacklevel=2,
+            )
+        else:
+            mod = sys.modules[importspec]
+            # 这一步所做的事情就是，把对应模块下所有被 hookimpl 装饰的方法或者以 pytest_ 开头的方法注册为插件的具体实现。
+            self.register(mod, modname)
+
+
+#+END_SRC
+
+* 在开始执行测试之前插件以及插件的实现
+
+#+BEGIN_SRC python
+
+  def print_hook_imp(plugin_manager):
+      import json
+      hook_info = dict()
+      hooks = [getattr(plugin_manager.hook, name) for name in dir(
+          plugin_manager.hook) if name.startswith('pytest_')]
+      for hook in hooks:
+          imps_info = [
+              imp.function.__code__.co_filename for imp in hook.get_hookimpls()]
+          hook_info[hook.name] = imps_info
+      info_str = json.dumps(hook_info, ensure_ascii=True, indent=4)
+      print(info_str)
+
+
+    def main(args=None, plugins=None) -> Union[int, ExitCode]:
+        """ return exit code, after performing an in-process test run.
+
+        :arg args: list of command line arguments.
+
+        :arg plugins: list of plugin objects to be auto-registered during
+                      initialization.
+        """
+        # ...
+                    # 打印插件信息
+                    print_hook_imp(config)
+                    ret = config.hook.pytest_cmdline_main(
+                        config=config
+                    )  # type: Union[ExitCode, int]
+        # ...
+#+END_SRC
+
+#+BEGIN_SRC json
+{
+    "pytest_addhooks": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_metadata/plugin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_html/plugin.py"
+    ],
+    "pytest_addoption": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/mark/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/main.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/fixtures.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/helpconfig.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/terminal.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/debugging.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/skipping.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/pastebin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/assertion/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/junitxml.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/resultlog.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/doctest.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/cacheprovider.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setuponly.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setupplan.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/stepwise.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/warnings.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/logging.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/faulthandler.py",
+            "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_rerunfailures.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_metadata/plugin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_html/plugin.py"
+    ],
+    "pytest_assertion_pass": [],
+    "pytest_assertrepr_compare": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/assertion/__init__.py"
+    ],
+    "pytest_cmdline_main": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/main.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/helpconfig.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/cacheprovider.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/mark/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setuponly.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setupplan.py"
+    ],
+    "pytest_cmdline_parse": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/config/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/helpconfig.py"
+    ],
+    "pytest_cmdline_preparse": [],
+    "pytest_collect_directory": [],
+    "pytest_collect_file": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/doctest.py"
+    ],
+    "pytest_collection": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/main.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/assertion/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/warnings.py"
+    ],
+    "pytest_collection_finish": [],
+    "pytest_collection_modifyitems": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/mark/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/main.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_ordering/__init__.py"
+    ],
+    "pytest_collectreport": [],
+    "pytest_collectstart": [],
+    "pytest_configure": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/logging.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/pastebin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/config/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/mark/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/terminal.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/debugging.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/skipping.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/tmpdir.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/junitxml.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/resultlog.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/stepwise.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/warnings.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/faulthandler.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/celery/contrib/pytest.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_rerunfailures.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_html/plugin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_ordering/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/cacheprovider.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_metadata/plugin.py"
+    ],
+    "pytest_deselected": [],
+    "pytest_doctest_prepare_content": [],
+    "pytest_enter_pdb": [],
+    "pytest_exception_interact": [],
+    "pytest_fixture_post_finalizer": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setuponly.py"
+    ],
+    "pytest_fixture_setup": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/fixtures.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setupplan.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/setuponly.py"
+    ],
+    "pytest_generate_tests": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py"
+    ],
+    "pytest_html_report_title": [],
+    "pytest_html_results_summary": [],
+    "pytest_html_results_table_header": [],
+    "pytest_html_results_table_html": [],
+    "pytest_html_results_table_row": [],
+    "pytest_ignore_collect": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/main.py"
+    ],
+    "pytest_internalerror": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_itemcollected": [],
+    "pytest_keyboard_interrupt": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_leave_pdb": [],
+    "pytest_load_initial_conftests": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/config/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_make_collect_report": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_make_parametrize_id": [],
+    "pytest_metadata": [],
+    "pytest_plugin_registered": [],
+    "pytest_pycollect_makeitem": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/unittest.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py"
+    ],
+    "pytest_pycollect_makemodule": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py"
+    ],
+    "pytest_pyfunc_call": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/python.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/skipping.py"
+    ],
+    "pytest_report_collectionfinish": [],
+    "pytest_report_from_serializable": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/reports.py"
+    ],
+    "pytest_report_header": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/helpconfig.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/cacheprovider.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_metadata/plugin.py"
+    ],
+    "pytest_report_teststatus": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/terminal.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/skipping.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_rerunfailures.py"
+    ],
+    "pytest_report_to_serializable": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/reports.py"
+    ],
+    "pytest_runtest_call": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_runtest_logfinish": [],
+    "pytest_runtest_logreport": [],
+    "pytest_runtest_logstart": [],
+    "pytest_runtest_makereport": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/unittest.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/skipping.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_html/plugin.py"
+    ],
+    "pytest_runtest_protocol": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_rerunfailures.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/unittest.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/assertion/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/warnings.py"
+    ],
+    "pytest_runtest_setup": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/nose.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/skipping.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_runtest_teardown": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/capture.py"
+    ],
+    "pytest_runtestloop": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/main.py"
+    ],
+    "pytest_sessionfinish": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/assertion/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/warnings.py"
+    ],
+    "pytest_sessionstart": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/fixtures.py"
+    ],
+    "pytest_terminal_summary": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/runner.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/pastebin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_rerunfailures.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/warnings.py"
+    ],
+    "pytest_testnodedown": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_metadata/plugin.py"
+    ],
+    "pytest_unconfigure": [
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/mark/__init__.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/pastebin.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/junitxml.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/resultlog.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/_pytest/doctest.py",
+        "/Users/mering/.envs/py3/lib/python3.8/site-packages/pytest_html/plugin.py"
+    ],
+    "pytest_warning_captured": []
+}
+#+END_SRC
+
+
+** 插件的执行顺序
+#+BEGIN_EXAMPLE
+;; 解析参数，初始化 pytest 插件
+=========== pytest_cmdline_parse
+=========== pytest_load_initial_conftests
+=========== pytest_cmdline_preparse
+;; 执行前的准备，打印 session 信息等
+=========== pytest_cmdline_main
+=========== pytest_metadata
+=========== pytest_sessionstart
+=========== pytest_report_header
+;; 搜集测试用例
+=========== pytest_collection
+=========== pytest_collectstart
+=========== pytest_make_collect_report
+=========== pytest_collect_file
+=========== pytest_pycollect_makemodule
+=========== pytest_collectreport
+=========== pytest_collectstart
+=========== pytest_make_collect_report
+=========== pytest_itemcollected
+=========== pytest_collectreport
+=========== pytest_collection_modifyitems
+=========== pytest_collection_finish
+;; 准备执行测试用例
+=========== pytest_runtestloop
+
+
+;; 开始执行每一个脚本，中的每一个测试用例
+=========== pytest_runtest_protocol
+=========== pytest_runtest_logstart
+=========== pytest_runtest_setup
+;; 测试用例中用到了 fixture，引用多个 fixture ，就会调用多次 pytest_fixture_setup
+=========== pytest_fixture_setup
+=========== pytest_runtest_makereport
+=========== pytest_runtest_logreport
+=========== pytest_report_teststatus
+=========== pytest_runtest_call
+;; 调用测试用例对应的方法
+=========== pytest_pyfunc_call
+=========== pytest_runtest_makereport
+=========== pytest_runtest_logreport
+;; 这个主要是记录是否测试通过
+=========== pytest_report_teststatus
+;; fixture 的 teardown 部分，
+=========== pytest_runtest_teardown
+;; 执行每一个 fixture 的 teardown 也就是有多个 fixture teardown，那么会多次调用 pytest_fixture_post_finalizer
+=========== pytest_fixture_post_finalizer
+=========== pytest_runtest_makereport
+=========== pytest_runtest_logreport
+=========== pytest_report_teststatus
+=========== pytest_runtest_logfinish
+
+=========== pytest_runtest_makereport
+=========== pytest_runtest_logreport
+=========== pytest_report_teststatus
+=========== pytest_fixture_setup
+=========== pytest_runtest_call
+=========== pytest_pyfunc_call
+=========== pytest_runtest_teardown
+=========== pytest_runtest_makereport
+=========== pytest_runtest_logreport
+=========== pytest_report_teststatus
+=========== pytest_fixture_post_finalizer
+=========== pytest_runtest_logfinish
+
+
+;; 测试结束
+=========== pytest_sessionfinish
+;; 统计最终的测试结果
+=========== pytest_terminal_summary
+=========== pytest_unconfigure
+#+END_EXAMPLE
+
+大致上是
+
+#+BEGIN_EXAMPLE
+main()
+ +- PyTestPluginManager()
+ +- Config()
+ +- import+register default built-in plugins
+ |   +- pytest_plugin_registerd()
+ +- pytest_namespace()
+ +- pytest_addoption()
+ +- pytest_cmdline_parse()
+ +- pytest_cmdline_main()
+     +- Session()
+     +- pytest_configure()
+     +- pytest_session_start()
+     +- pytest_collection() 1:1
+     |   +- pytest_collectreport() per item
+     |   +- pytest_collection_modifyitems()
+     |   +- pytest_collection_finish()
+     +- pytest_runtestloop()
+     |   +- pytest_runtest_protocol() per item
+     |       +- pytest_runtest_logstart()
+     |       +- pytest_runtest_setup()
+     |       +- pytest_runtest_call()
+     |       +- pytest_runtest_teardown()
+     +- pytest_sessionfinish()
+     +- pytest_unconfigure()
+#+END_EXAMPLE

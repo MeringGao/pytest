@@ -1,0 +1,206 @@
+#+TITLE: pytest 中的 pluggy
+
+* 插件的两个装饰器和插件管理器
+
+#+BEGIN_SRC python
+  # _pytest.config.__init__.py
+  # ...
+  hookimpl = HookimplMarker("pytest")
+  hookspec = HookspecMarker("pytest")
+  # ...
+
+  # 继承自 PluginManager
+  # 产检管理器的实例化是在
+  # def get_config(args=None, plugins=None):
+  #     # subsequent calls to main will create a fresh instance
+  #     pluginmanager = PytestPluginManager()
+  #     config = Config(
+  #         pluginmanager,
+  #         invocation_params=Config.InvocationParams(
+  #             args=args or (), plugins=plugins, dir=Path().resolve()
+  #         ),
+  #     )
+
+  #     if args is not None:
+  #         # Handle any "-p no:plugin" args.
+  #         pluginmanager.consider_preparse(args, exclude_only=True)
+
+  #     for spec in default_plugins:
+  #         pluginmanager.import_plugin(spec)
+  #     return config
+
+
+  class PytestPluginManager(PluginManager):
+      """
+      Overwrites :py:class:`pluggy.PluginManager <pluggy.PluginManager>` to add pytest-specific
+      functionality:
+
+      ,* loading plugins from the command line, ``PYTEST_PLUGINS`` env variable and
+        ``pytest_plugins`` global variables found in plugins being loaded;
+      ,* ``conftest.py`` loading during start-up;
+      """
+
+      def __init__(self):
+          import _pytest.assertion
+          # 插件管理器的名字和 hookspec 以及 hookimpl 保持一致
+          super().__init__("pytest")
+
+
+          # The objects are module objects, only used generically.
+          self._conftest_plugins = set()  # type: Set[object]
+
+          # state related to local conftest plugins
+          # Maps a py.path.local to a list of module objects.
+          self._dirpath2confmods = {}  # type: Dict[Any, List[object]]
+          # Maps a py.path.local to a module object.
+          self._conftestpath2mod = {}  # type: Dict[Any, object]
+          self._confcutdir = None
+          self._noconftest = False
+          # Set of py.path.local's.
+          self._duplicatepaths = set()  # type: Set[Any]
+
+          # 注册插件
+          self.add_hookspecs(_pytest.hookspec)
+          # 绑定插件的具体实现
+          self.register(self)
+
+
+          if os.environ.get("PYTEST_DEBUG"):
+              err = sys.stderr
+              encoding = getattr(err, "encoding", "utf8")
+              try:
+                  err = py.io.dupfile(err, encoding=encoding)
+              except Exception:
+                  pass
+              self.trace.root.setwriter(err.write)
+              self.enable_tracing()
+
+          # Config._consider_importhook will set a real object if required.
+          self.rewrite_hook = _pytest.assertion.DummyRewriteHook()
+          # Used to know when we are importing conftests after the pytest_configure stage
+          self._configured = False
+#+END_SRC
+
+pytest 的中第一步动作就是要做插件的定义和绑定插件的实现。然后在测试执行过程中调用具体的插件。
+
+
+* 插件定义和注册
+
+PytestPluginManager 的 =__init__= 方法中 通过调用 =self.add_hookspecs(_pytest.hookspec)= 实现了插件的注册
+
+插件的定义是在 =_pytes.hookspecs.py= 文件中，需要注意的是虽然这个文件中有些函数没有被装饰，但是也会被作为插件，只要这些方法名字是以 =pytest_= 开头，来看下如何识别插件定义和差价的实现的。这两个方法覆盖了父类的方法。
+
+
+#+BEGIN_SRC python
+    def parse_hookimpl_opts(self, plugin, name):
+        # pytest hooks are always prefixed with pytest_
+        # so we avoid accessing possibly non-readable attributes
+        # (see issue #1073)
+        # 在 pytest 中插件的定义名字都是以 pytest_ 开头的，所以这里要求 产检的实现也是以 pytest_ 开头的方法
+        if not name.startswith("pytest_"):
+            return
+        # ignore names which can not be hooks
+        if name == "pytest_plugins":
+            return
+
+        method = getattr(plugin, name)
+        # 读取方法的 pytest_impl 属性
+        opts = super().parse_hookimpl_opts(plugin, name)
+
+        # consider only actual functions for hooks (#3775)
+        if not inspect.isroutine(method):
+            return
+
+        # collect unmarked hooks as long as they have the `pytest_' prefix
+        # 如果没有被 hookimpl 装饰，并且这个方法名字是以 pytest_ 开头，那么返回空的 opts ，也就是这个方法被注册为插件的实现
+        # 目前只有一个方法 pytest_configure
+        if opts is None and name.startswith("pytest_"):
+            opts = {}
+        if opts is not None:
+            # TODO: DeprecationWarning, people should use hookimpl
+            # https://github.com/pytest-dev/pytest/issues/4562
+            known_marks = {m.name for m in getattr(method, "pytestmark", [])}
+
+            for name in ("tryfirst", "trylast", "optionalhook", "hookwrapper"):
+                opts.setdefault(name, hasattr(method, name) or name in known_marks)
+        return opts
+
+    def parse_hookspec_opts(self, module_or_class, name):
+        # 首先使用 默认的方式，就是找方法有没有 'pytest_spec' 属性
+        opts = super().parse_hookspec_opts(module_or_class, name)
+        if opts is None:
+            # 如果默认方式没有找到，就看下是不是以 pytest_ 开头的方法，如果是就返回默认自定义的 opts 返回，也就是说也注册为插件
+            method = getattr(module_or_class, name)
+
+            if name.startswith("pytest_"):
+                # todo: deprecate hookspec hacks
+                # https://github.com/pytest-dev/pytest/issues/4562
+                known_marks = {m.name for m in getattr(method, "pytestmark", [])}
+                opts = {
+                    "firstresult": hasattr(method, "firstresult")
+                    or "firstresult" in known_marks,
+                    "historic": hasattr(method, "historic")
+                    or "historic" in known_marks,
+                }
+        return opts
+#+END_SRC
+
+PluginMannager 对象初始化之后注册的插件以及插件的实现如下:
+
+#+BEGIN_EXAMPLE
+[('pytest_addhooks', []),
+ ('pytest_addoption', []),
+ ('pytest_assertion_pass', []),
+ ('pytest_assertrepr_compare', []),
+ ('pytest_cmdline_main', []),
+ ('pytest_cmdline_parse', []),
+ ('pytest_cmdline_preparse', []),
+ ('pytest_collect_directory', []),
+ ('pytest_collect_file', []),
+ ('pytest_collection', []),
+ ('pytest_collection_finish', []),
+ ('pytest_collection_modifyitems', []),
+ ('pytest_collectreport', []),
+ ('pytest_collectstart', []),
+ ('pytest_configure',
+  [<HookImpl plugin_name='4378004880', plugin=<_pytest.config.PytestPluginManager object at 0x104f30d90>>]),
+ ('pytest_deselected', []),
+ ('pytest_doctest_prepare_content', []),
+ ('pytest_enter_pdb', []),
+ ('pytest_exception_interact', []),
+ ('pytest_fixture_post_finalizer', []),
+ ('pytest_fixture_setup', []),
+ ('pytest_generate_tests', []),
+ ('pytest_ignore_collect', []),
+ ('pytest_internalerror', []),
+ ('pytest_itemcollected', []),
+ ('pytest_keyboard_interrupt', []),
+ ('pytest_leave_pdb', []),
+ ('pytest_load_initial_conftests', []),
+ ('pytest_make_collect_report', []),
+ ('pytest_make_parametrize_id', []),
+ ('pytest_plugin_registered', []),
+ ('pytest_pycollect_makeitem', []),
+ ('pytest_pycollect_makemodule', []),
+ ('pytest_pyfunc_call', []),
+ ('pytest_report_collectionfinish', []),
+ ('pytest_report_from_serializable', []),
+ ('pytest_report_header', []),
+ ('pytest_report_teststatus', []),
+ ('pytest_report_to_serializable', []),
+ ('pytest_runtest_call', []),
+ ('pytest_runtest_logfinish', []),
+ ('pytest_runtest_logreport', []),
+ ('pytest_runtest_logstart', []),
+ ('pytest_runtest_makereport', []),
+ ('pytest_runtest_protocol', []),
+ ('pytest_runtest_setup', []),
+ ('pytest_runtest_teardown', []),
+ ('pytest_runtestloop', []),
+ ('pytest_sessionfinish', []),
+ ('pytest_sessionstart', []),
+ ('pytest_terminal_summary', []),
+ ('pytest_unconfigure', []),
+ ('pytest_warning_captured', [])]
+
+#+END_EXAMPLE
