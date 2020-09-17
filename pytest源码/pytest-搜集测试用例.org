@@ -1,0 +1,19 @@
+#+TITLE: pytest 搜集测试用例
+
+* 测试用例搜集过程中使用的结构
+
+在搜集过程中，pytest 会构建一棵树，这棵树的叶子节点是 Item 对象，其他都是 Node 子类对象(Item 实际也是 Node 子类)。
+
+
+#+BEGIN_SRC shell
+Session(Session)                            ;; pytest 的 session 对象
++----- Module(Node)                         ;; 测试文件，也就是一个 python 模块
++------------Class(Node)                    ;; 测试文件中的类
++-----------------Instance(Node)            ;; 类对象
++-------------------------Function(Item)    ;; 类对象的测试方法，或者是一个测试函数
+#+END_SRC
+
+
+** 节点的根类
+
+=_pytes/nodes.py::class Node=
